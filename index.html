@@ -802,7 +802,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 
 /* ---------- controls ---------- */
 label.fld { display: block; font-size: 12px; color: var(--text-dim); margin: 10px 0 4px; }
-input[type=text], input[type=date], input[type=time], select, textarea {
+input[type=text], input[type=date], input[type=time], input[type=search], select, textarea {
   width: 100%;
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -975,6 +975,7 @@ details.fac .explain { margin-top: 4px; }
   border-radius: 50% 50% 50% 0; transform: rotate(-45deg);
   border: 2px solid rgba(0,0,0,.55);
   box-shadow: 0 1px 4px rgba(0,0,0,.5);
+  transition: transform .12s ease, box-shadow .12s ease;
 }
 .stand-pin span {
   display: block; transform: rotate(45deg);
@@ -991,8 +992,14 @@ details.fac .explain { margin-top: 4px; }
   border-radius: 50%; border: 2px solid rgba(0,0,0,.55);
   box-shadow: 0 1px 3px rgba(0,0,0,.5);
   display: flex; align-items: center; justify-content: center;
+  transition: transform .12s ease, box-shadow .12s ease;
 }
 .sign-pin span { font-size: 11px; font-weight: 700; color: #12100c; }
+
+/* long-press-armed pin (about to be dragged) — scaled up with a gold ring */
+.marker-armed .stand-pin { transform: rotate(-45deg) scale(1.3); box-shadow: 0 0 0 5px rgba(255,210,74,.55), 0 1px 4px rgba(0,0,0,.6); }
+.marker-armed .sign-pin { transform: scale(1.3); box-shadow: 0 0 0 5px rgba(255,210,74,.55), 0 1px 3px rgba(0,0,0,.6); }
+.marker-armed .harvest-pin { transform: scale(1.25); filter: drop-shadow(0 0 5px rgba(255,210,74,.85)) drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
 
 .me-dot {
   width: 16px; height: 16px; border-radius: 50%;
@@ -1041,6 +1048,7 @@ details.fac .explain { margin-top: 4px; }
 .harvest-pin {
   width: 26px; height: 26px; margin-left: -13px; margin-top: -15px;
   filter: drop-shadow(0 1px 2px rgba(0,0,0,.6));
+  transition: transform .12s ease, filter .12s ease;
 }
 .harvest-chip {
   flex: 0 0 auto; width: 22px; height: 22px;
@@ -1055,27 +1063,32 @@ details.fac .explain { margin-top: 4px; }
 }
 .dp-coord:hover { color: #fff; }
 
-.dp-search { width: 240px; max-width: 58vw; }
 #app.panel-hidden .leaflet-top.leaflet-left { margin-left: 46px; }
-.dp-search form { margin: 0; }
-.dp-search input {
-  width: 100%; padding: 7px 9px; font-size: 13px;
-  background: #fff; color: #222; border: 2px solid rgba(0,0,0,.25);
-  border-radius: 5px; box-shadow: 0 1px 5px rgba(0,0,0,.3);
+
+/* pinned address search — sits above every collapsible section, never over the map */
+.panel-search { padding: 8px 16px 10px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+.panel-search form { margin: 0; }
+.panel-search-res:not(:empty) {
+  margin-top: 6px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; overflow: hidden; max-height: 44vh; overflow-y: auto;
 }
-.dp-search-res:not(:empty) {
-  margin-top: 4px; background: #1c2228; border: 1px solid var(--line);
-  border-radius: 6px; overflow: hidden; box-shadow: 0 4px 14px rgba(0,0,0,.5);
-}
-.dp-search-row {
+.panel-search-row {
   display: block; width: 100%; text-align: left;
   background: none; border: 0; border-bottom: 1px solid var(--line);
   color: var(--text); font: inherit; font-size: 12px; line-height: 1.35;
   padding: 8px 10px; cursor: pointer;
 }
-.dp-search-row:last-child { border-bottom: 0; }
-.dp-search-row:hover { background: var(--panel-2); }
-.dp-search-hint { padding: 8px 10px; font-size: 12px; color: var(--text-dim); }
+.panel-search-row:last-child { border-bottom: 0; }
+.panel-search-row:hover { background: var(--panel); }
+.panel-search-hint { padding: 6px 2px 0; font-size: 12px; color: var(--text-dim); }
+
+/* shrink the Leaflet/Esri credit strip — it's required to stay, not to be huge */
+.leaflet-control-attribution {
+  font-size: 9px !important; line-height: 1.3; padding: 0 4px !important;
+  background: rgba(20,24,28,.65) !important; color: #b7bfc6 !important;
+  max-width: 62vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.leaflet-control-attribution a { color: #cfd6db !important; }
 
 ol.steps { margin: 4px 0; padding-left: 20px; }
 ol.steps li { margin: 8px 0; font-size: 12.5px; line-height: 1.5; }
@@ -1257,12 +1270,16 @@ ol.steps li span { color: var(--text-dim); }
       <h1>Deer Planner</h1>
       <div class="panel-sub" id="propLabel">&mdash;</div>
     </header>
+    <div class="panel-search">
+      <form id="addrForm"><input type="search" id="addrInput" placeholder="Find an address, town or ZIP…" autocomplete="off" /></form>
+      <div class="panel-search-res" id="addrRes"></div>
+    </div>
     <div class="panel-body" id="panelBody"><!-- rendered by app.js --></div>
     <footer class="panel-foot">
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">20s scent check</span>
+      <span class="build-tag">Search off map</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -3537,7 +3554,6 @@ function initMap() {
   });
   map.on("popupclose", () => closeHarvestTips());
 
-  map.addControl(new SearchControl());
   map.addControl(new LocateControl());
   map.addControl(new AddControl());
   coordCtl = new CoordControl();
@@ -3815,57 +3831,47 @@ function conePts(lat, lng, toDeg, mph, thermalShare) {
 }
 
 /* address / place search (OpenStreetMap Nominatim — free, no key) */
-const SearchControl = L.Control.extend({
-  options: { position: "topleft" },
-  onAdd() {
-    const wrap = L.DomUtil.create("div", "dp-search");
-    wrap.innerHTML =
-      `<form><input type="search" placeholder="address, town or ZIP…" autocomplete="off" /></form>` +
-      `<div class="dp-search-res"></div>`;
-    L.DomEvent.disableClickPropagation(wrap);
-    L.DomEvent.disableScrollPropagation(wrap);
-    const input = wrap.querySelector("input");
-    const res = wrap.querySelector(".dp-search-res");
-    wrap.querySelector("form").onsubmit = (e) => {
-      e.preventDefault();
-      const q = input.value.trim();
-      if (!q) return;
-      res.innerHTML = `<div class="dp-search-hint">searching…</div>`;
-      fetch(
-        "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=" + encodeURIComponent(q),
-        { headers: { Accept: "application/json" } }
-      )
-        .then((r) => r.json())
-        .then((rows) => {
-          if (!rows || !rows.length) {
-            res.innerHTML = `<div class="dp-search-hint">nothing found</div>`;
-            return;
-          }
-          res.innerHTML = rows
-            .map(
-              (x, i) =>
-                `<button type="button" class="dp-search-row" data-i="${i}">${esc(x.display_name)}</button>`
-            )
-            .join("");
-          res.querySelectorAll(".dp-search-row").forEach((b) => {
-            b.onclick = () => {
-              const x = rows[+b.dataset.i];
-              const bb = x.boundingbox;
-              if (bb)
-                map.fitBounds([[+bb[0], +bb[2]], [+bb[1], +bb[3]]], { maxZoom: 16, padding: [30, 30] });
-              else map.setView([+x.lat, +x.lon], 15);
-              res.innerHTML = "";
-              input.value = "";
-            };
-          });
-        })
-        .catch(() => {
-          res.innerHTML = `<div class="dp-search-hint">search unavailable — check your connection</div>`;
+/* address / place search — pinned in the panel (above every section) so it never
+   sits over the map and block popups like "add a harvest" on a phone */
+function initAddressSearch() {
+  const form = $("#addrForm"), input = $("#addrInput"), res = $("#addrRes");
+  if (!form) return;
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const q = input.value.trim();
+    if (!q) return;
+    res.innerHTML = `<div class="panel-search-hint">searching…</div>`;
+    fetch(
+      "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=" + encodeURIComponent(q),
+      { headers: { Accept: "application/json" } }
+    )
+      .then((r) => r.json())
+      .then((rows) => {
+        if (!rows || !rows.length) {
+          res.innerHTML = `<div class="panel-search-hint">nothing found</div>`;
+          return;
+        }
+        res.innerHTML = rows
+          .map((x, i) => `<button type="button" class="panel-search-row" data-i="${i}">${esc(x.display_name)}</button>`)
+          .join("");
+        res.querySelectorAll(".panel-search-row").forEach((b) => {
+          b.onclick = () => {
+            const x = rows[+b.dataset.i];
+            const bb = x.boundingbox;
+            if (bb) map.fitBounds([[+bb[0], +bb[2]], [+bb[1], +bb[3]]], { maxZoom: 16, padding: [30, 30] });
+            else map.setView([+x.lat, +x.lon], 15);
+            res.innerHTML = "";
+            input.value = "";
+            input.blur();
+            if (window.matchMedia("(max-width:640px)").matches) hidePanel();
+          };
         });
-    };
-    return wrap;
-  },
-});
+      })
+      .catch(() => {
+        res.innerHTML = `<div class="panel-search-hint">search unavailable — check your connection</div>`;
+      });
+  };
+}
 
 /* red deer-head silhouette for harvest markers (buck = antlers, else doe) */
 function deerHeadSVG(buck, size, color) {
@@ -3933,10 +3939,10 @@ const AddControl = L.Control.extend({
 /* live cursor lat / long readout */
 let lastCursorLL = null;
 const CoordControl = L.Control.extend({
-  options: { position: "bottomleft" },
+  options: { position: "topleft" },
   onAdd() {
     const d = L.DomUtil.create("div", "dp-coord");
-    d.textContent = "move the map for coordinates";
+    d.textContent = "tap map for coords";
     d.title = "Tap to copy";
     L.DomEvent.disableClickPropagation(d);
     d.onclick = () => { if (lastCursorLL) copyCoords(lastCursorLL.lat, lastCursorLL.lng); };
@@ -3949,6 +3955,101 @@ const CoordControl = L.Control.extend({
   },
 });
 let coordCtl = null;
+
+/* ---- long-press to move a pin ----
+   Markers start non-draggable so a normal touch that lands on a pin still pans/pinches
+   the map underneath it. Hold ~half a second without moving to "arm" the pin, then drag
+   it (still holding) and lift to drop. A quick tap still opens it as before. */
+const LONGPRESS_MS = 550;
+const LONGPRESS_SLOP = 10; // px of finger wobble tolerated before the hold is cancelled
+
+function lpEvtPoint(e) {
+  const t = e.touches && e.touches.length ? e.touches[0] : (e.changedTouches && e.changedTouches.length ? e.changedTouches[0] : e);
+  return { x: t.clientX, y: t.clientY };
+}
+function lpEvtLatLng(e) {
+  const t = e.touches && e.touches.length ? e.touches[0] : (e.changedTouches && e.changedTouches.length ? e.changedTouches[0] : e);
+  return map.mouseEventToLatLng(t);
+}
+let lpCancelPending = null; // cancel() of a not-yet-armed long-press, so a second finger (pinch) can kill it
+document.addEventListener(
+  "touchstart",
+  (e) => { if (e.touches && e.touches.length > 1 && lpCancelPending) { lpCancelPending(); lpCancelPending = null; } },
+  { passive: true, capture: true }
+);
+
+function enableLongPressMove(marker, handlers) {
+  let timer = null, armed = false, startPt = null, el = null, tookMapDrag = false;
+
+  function cancel() {
+    clearTimeout(timer);
+    timer = null;
+    if (lpCancelPending === cancel) lpCancelPending = null;
+  }
+  function docMove(e) { onMove(e); }
+  function docUp(e) { onUp(e); }
+  function arm() {
+    armed = true;
+    timer = null;
+    if (lpCancelPending === cancel) lpCancelPending = null;
+    if (el) el.classList.add("marker-armed");
+    if (navigator.vibrate) { try { navigator.vibrate(20); } catch (e) {} }
+    toast("Drag to move — lift to drop");
+    // the original touch/mousedown also reached the map underneath — fully lock map
+    // panning while we own the gesture, or Leaflet's own drag machinery fights ours
+    if (map.dragging && map.dragging.enabled()) { map.dragging.disable(); tookMapDrag = true; }
+    document.addEventListener("mousemove", docMove);
+    document.addEventListener("mouseup", docUp);
+    handlers.onStart && handlers.onStart(marker.getLatLng());
+  }
+  function disarm() {
+    armed = false;
+    if (el) el.classList.remove("marker-armed");
+    if (tookMapDrag) { map.dragging.enable(); tookMapDrag = false; }
+    document.removeEventListener("mousemove", docMove);
+    document.removeEventListener("mouseup", docUp);
+  }
+  function onDown(e) {
+    if (e.touches && e.touches.length > 1) { cancel(); return; }
+    if (armed) return;
+    startPt = lpEvtPoint(e);
+    cancel();
+    timer = setTimeout(arm, LONGPRESS_MS);
+    lpCancelPending = cancel;
+  }
+  function onMove(e) {
+    if (!armed) {
+      if (timer) {
+        const p = lpEvtPoint(e);
+        if (Math.hypot(p.x - startPt.x, p.y - startPt.y) > LONGPRESS_SLOP) cancel();
+      }
+      return;
+    }
+    if (e.cancelable) e.preventDefault();
+    const ll = lpEvtLatLng(e);
+    marker.setLatLng(ll);
+    handlers.onMove && handlers.onMove(ll);
+  }
+  function onUp() {
+    cancel();
+    if (armed) {
+      const ll = marker.getLatLng();
+      disarm();
+      handlers.onEnd && handlers.onEnd(ll);
+    }
+  }
+
+  marker.on("add", () => {
+    el = marker.getElement();
+    if (!el) return;
+    el.addEventListener("touchstart", onDown, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    el.addEventListener("touchend", onUp, { passive: true });
+    el.addEventListener("touchcancel", onUp, { passive: true });
+    el.addEventListener("mousedown", onDown);
+  });
+  marker.on("remove", () => { cancel(); if (armed) disarm(); });
+}
 
 /* ---- harvest log ---- */
 function harvestIcon(h) {
@@ -4010,7 +4111,7 @@ function renderHarvestMarkers() {
   Object.values(harvestMarkers).forEach((m) => map.removeLayer(m));
   harvestMarkers = {};
   pHarvests().forEach((h) => {
-    const m = L.marker([h.lat, h.lng], { icon: harvestIcon(h), draggable: true, autoPan: true });
+    const m = L.marker([h.lat, h.lng], { icon: harvestIcon(h), draggable: false });
     if (pStands().length)
       m.bindTooltip(harvestTooltipText(h) || "no stands mapped", {
         permanent: true, direction: "top", offset: [0, -12], className: "harvest-tt",
@@ -4027,21 +4128,22 @@ function renderHarvestMarkers() {
       showTip();
       harvestPopup(h, m);
     });
-    m.on("dragstart", () => { closeHarvestTips(); showTip(); });
-    m.on("drag", (e) => {
-      const p = e.target.getLatLng();
-      h.lat = p.lat;
-      h.lng = p.lng;
-      if (m.getTooltip()) m.setTooltipContent(harvestTooltipText(h) || "no stands mapped");
-      const dl = document.getElementById("hvDistLine");
-      if (dl) dl.textContent = harvestDistLine(h);
-    });
-    m.on("dragend", () => {
-      saveState();
-      renderHarvestPanel();
-      renderStands();
-      clearTimeout(m._ttHide);
-      m._ttHide = setTimeout(() => { try { m.closeTooltip(); } catch (e) {} }, 1400);
+    enableLongPressMove(m, {
+      onStart: () => { closeHarvestTips(); showTip(); },
+      onMove: (ll) => {
+        h.lat = ll.lat;
+        h.lng = ll.lng;
+        if (m.getTooltip()) m.setTooltipContent(harvestTooltipText(h) || "no stands mapped");
+        const dl = document.getElementById("hvDistLine");
+        if (dl) dl.textContent = harvestDistLine(h);
+      },
+      onEnd: () => {
+        saveState();
+        renderHarvestPanel();
+        renderStands();
+        clearTimeout(m._ttHide);
+        m._ttHide = setTimeout(() => { try { m.closeTooltip(); } catch (e) {} }, 1400);
+      },
     });
     m.addTo(map);
     if (m.getTooltip()) m.closeTooltip(); // hidden until clicked or dragged
@@ -4909,14 +5011,15 @@ function renderStandMarkers() {
   standMarkers = {};
   pStands().forEach((st) => {
     const sc = scoreStand(st).score;
-    const m = L.marker([st.lat, st.lng], { icon: standIcon(st, sc), draggable: true });
+    const m = L.marker([st.lat, st.lng], { icon: standIcon(st, sc), draggable: false });
     m.on("click", () => selectStand(st.id));
-    m.on("dragend", (e) => {
-      const p = e.target.getLatLng();
-      st.lat = p.lat;
-      st.lng = p.lng;
-      saveState();
-      renderStands();
+    enableLongPressMove(m, {
+      onEnd: (ll) => {
+        st.lat = ll.lat;
+        st.lng = ll.lng;
+        saveState();
+        renderStands();
+      },
     });
     m.addTo(map);
     standMarkers[st.id] = m;
@@ -4972,13 +5075,14 @@ function renderSignMarkers() {
   Object.values(signMarkers).forEach((m) => map.removeLayer(m));
   signMarkers = {};
   pSigns().forEach((sign) => {
-    const m = L.marker([sign.lat, sign.lng], { icon: signIcon(sign), draggable: true });
+    const m = L.marker([sign.lat, sign.lng], { icon: signIcon(sign), draggable: false });
     m.on("click", () => signPopup(sign, m));
-    m.on("dragend", (e) => {
-      const p = e.target.getLatLng();
-      sign.lat = p.lat;
-      sign.lng = p.lng;
-      saveState();
+    enableLongPressMove(m, {
+      onEnd: (ll) => {
+        sign.lat = ll.lat;
+        sign.lng = ll.lng;
+        saveState();
+      },
     });
     m.addTo(map);
     signMarkers[sign.id] = m;
@@ -5106,7 +5210,7 @@ function sectionShell(id, title, bodyHTML, collapsed, sub) {
 }
 
 const SETUP_STEPS = [
-  ["Find your ground", "Type an address, town or ZIP in the search box on the map (top-left), or pan and zoom to the parcel you hunt."],
+  ["Find your ground", "Type an address, town or ZIP in the search box at the top of this panel, or pan and zoom to the parcel you hunt."],
   ["Draw the property line", "Map panel → “Draw property line” and click the corners, or “Property line by coords” to paste them. This line is what groups everything — stands inside it are that property’s stands."],
   ["Drop your stands", "Use the + button on the map, or “+ Add stand” in the panel. For each one set its good winds, or the direction deer approach from, so it can be scored."],
   ["Add the terrain", "Terrain panel → “Add this view as terrain”. This pulls elevation data so the app can reason about slope, thermals and where deer travel."],
@@ -6789,6 +6893,8 @@ function init() {
   setTimeout(() => {
     try { if (map) map.invalidateSize(); } catch (e) {}
   }, 300);
+
+  initAddressSearch();
 
   $("#panelToggle").onclick = showPanel;
   // add a hide control inside panel head
