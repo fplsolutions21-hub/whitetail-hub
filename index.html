@@ -1240,10 +1240,17 @@ ol.steps li span { color: var(--text-dim); }
   background: var(--panel); border: 1px solid var(--line); border-radius: 5px; color: var(--text);
 }
 
-/* ---------- scent drift cone ---------- */
+/* ---------- scent drift cone + safe walk-in wedge ---------- */
 .scent-flow { animation: scentflow 1.3s linear infinite; }
 @keyframes scentflow { to { stroke-dashoffset: -24; } }
 @media (prefers-reduced-motion: reduce) { .scent-flow { animation: none; } }
+.approach-tag {
+  background: rgba(20,24,28,.85); color: #8ee6b0;
+  border: 1px solid rgba(95,208,138,.45); border-radius: 3px;
+  padding: 0 5px; font-size: 10px; font-weight: 800; letter-spacing: .3px;
+  text-transform: uppercase; white-space: nowrap;
+  transform: translate(-50%, -50%); display: inline-block;
+}
 
 /* ---------- recovery ---------- */
 .rec-shot { font-size: 12.5px; color: var(--text); margin-bottom: 2px; }
@@ -1301,7 +1308,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Distance ruler</span>
+      <span class="build-tag">Approach direction</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -3692,7 +3699,10 @@ function updateMe(pos) {
   meAcc = pos.coords.accuracy || 0;
   if (!meMarker) {
     meMarker = L.marker(meLatLng, { icon: meIcon(), zIndexOffset: 2000, title: "Tap for a 20-sec scent check" }).addTo(map);
-    meMarker.on("click", () => { if (meLatLng) showScent(meLatLng[0], meLatLng[1]); });
+    meMarker.on("click", () => {
+      if (measure && meLatLng) { addMeasurePoint(L.latLng(meLatLng[0], meLatLng[1])); return; }
+      if (meLatLng) showScent(meLatLng[0], meLatLng[1]);
+    });
     meCircle = L.circle(meLatLng, { radius: meAcc, color: "#4a9eff", weight: 1, fillColor: "#4a9eff", fillOpacity: 0.12, interactive: false }).addTo(map);
   } else {
     meMarker.setLatLng(meLatLng);
@@ -3812,7 +3822,7 @@ function clearScent() {
   scentTimer = null;
   if (scentLayer) { map.removeLayer(scentLayer); scentLayer = null; }
 }
-function showScent(lat, lng) {
+function showScent(lat, lng, opts) {
   clearScent();
   if (!map || !state.settings.scentCone) return;
   const d = scentDrift(lat, lng);
@@ -3829,6 +3839,17 @@ function showScent(lat, lng) {
       [[lat, lng], destPoint(lat, lng, d.toDeg + k * spread, len * (0.76 + 0.12 * (k + 1)))],
       { className: "scent-flow", color: "#a9e2ff", weight: 2, opacity: 0.55, dashArray: "3 9", lineCap: "round", interactive: false }
     ).addTo(grp);
+  // safe walk-in wedge (Feature C) — green, on the side you should approach from
+  if (opts && opts.approachDeg != null) {
+    const wl = 120;
+    const wpts = [[lat, lng]];
+    for (let a = -26; a <= 26.001; a += 13) wpts.push(destPoint(lat, lng, opts.approachDeg + a, wl));
+    L.polygon(wpts, { className: "approach-wedge", stroke: false, fill: true, fillColor: "#5fd08a", fillOpacity: 0.16, interactive: false }).addTo(grp);
+    L.marker(destPoint(lat, lng, opts.approachDeg, wl * 0.62), {
+      interactive: false,
+      icon: L.divIcon({ className: "", html: `<div class="approach-tag">walk in</div>`, iconSize: [1, 1] }),
+    }).addTo(grp);
+  }
   grp.addTo(map);
   scentLayer = grp;
   // fade out over the final ~800ms, then remove
@@ -3857,6 +3878,44 @@ function conePts(lat, lng, toDeg, mph, thermalShare) {
   for (let a = -half; a <= half + 0.001; a += half / 5)
     pts.push(destPoint(lat, lng, toDeg + a, len));
   return pts;
+}
+
+function bearingDeg(lat1, lng1, lat2, lng2) {
+  const r = Math.PI / 180;
+  const y = Math.sin((lng2 - lng1) * r) * Math.cos(lat2 * r);
+  const x =
+    Math.cos(lat1 * r) * Math.sin(lat2 * r) -
+    Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos((lng2 - lng1) * r);
+  return (Math.atan2(y, x) / r + 360) % 360;
+}
+
+/* Feature C: which way to walk in to a stand today without winding deer.
+   Come in from downwind (wind in your face), off the deer's approach line and
+   away from any marked bedding. */
+function standApproach(st) {
+  const d = scentDrift(st.lat, st.lng);
+  if (!d) return null;
+  const dd = deerDirsOf(st).map(dirToDeg);
+  const beds = (pSigns() || [])
+    .filter((s) => s.type === "bedding")
+    .map((s) => ({ brg: bearingDeg(st.lat, st.lng, s.lat, s.lng), dist: map.distance([st.lat, st.lng], [s.lat, s.lng]) }))
+    .filter((b) => b.dist < 400);
+  let best = null;
+  for (let i = 0; i < 8; i++) {
+    const cand = i * 45;
+    let sc = 1 - angDiff(cand, d.toDeg) / 180; // come in from downwind (toDeg side)
+    sc -= (1 - angDiff(cand, d.fromDeg) / 180) * 0.7; // not from upwind
+    dd.forEach((x) => { sc -= Math.max(0, 1 - angDiff(cand, x) / 60) * 1.5; }); // off the deer's line
+    beds.forEach((b) => { sc -= Math.max(0, 1 - angDiff(cand, b.brg) / 60) * 1.7; }); // away from beds
+    if (!best || sc > best.sc) best = { deg: cand, sc };
+  }
+  const compass = degToCompass8(best.deg);
+  const why = beds.length
+    ? "downwind, and off the bedding"
+    : dd.length
+    ? `keeps your wind off the ${dd.map(degToCompass8).join("/")} deer`
+    : "so the wind's in your face and your scent trails away behind you";
+  return { deg: best.deg, compass, text: `Come in from the ${compass} — ${why}` };
 }
 
 /* address / place search (OpenStreetMap Nominatim — free, no key) */
@@ -4264,6 +4323,7 @@ function renderHarvestMarkers() {
     };
 
     m.on("click", () => {
+      if (measure) { addMeasurePoint(m.getLatLng()); return; }
       closeHarvestTips();
       showTip();
       harvestPopup(h, m);
@@ -5152,7 +5212,7 @@ function renderStandMarkers() {
   pStands().forEach((st) => {
     const sc = scoreStand(st).score;
     const m = L.marker([st.lat, st.lng], { icon: standIcon(st, sc), draggable: false });
-    m.on("click", () => selectStand(st.id));
+    m.on("click", () => { if (measure) { addMeasurePoint(m.getLatLng()); return; } selectStand(st.id); });
     enableLongPressMove(m, {
       onEnd: (ll) => {
         st.lat = ll.lat;
@@ -5197,7 +5257,11 @@ function selectStand(id) {
   renderResearchPanel();
   openSection("stands");
   const st = state.stands.find((s) => s.id === id);
-  if (st) { map.panTo([st.lat, st.lng]); showScent(st.lat, st.lng); } // 20-sec scent check
+  if (st) {
+    map.panTo([st.lat, st.lng]);
+    const ap = standApproach(st);
+    showScent(st.lat, st.lng, ap ? { approachDeg: ap.deg } : null); // 20-sec scent + walk-in check
+  }
   const node = $(`.stand[data-id="${id}"]`);
   if (node) node.scrollIntoView({ block: "nearest" });
 }
@@ -5217,7 +5281,7 @@ function renderSignMarkers() {
   signMarkers = {};
   pSigns().forEach((sign) => {
     const m = L.marker([sign.lat, sign.lng], { icon: signIcon(sign), draggable: false });
-    m.on("click", () => signPopup(sign, m));
+    m.on("click", () => { if (measure) { addMeasurePoint(m.getLatLng()); return; } signPopup(sign, m); });
     enableLongPressMove(m, {
       onEnd: (ll) => {
         sign.lat = ll.lat;
@@ -5596,7 +5660,7 @@ function runScout() {
   scoutCandidates._scopedToProperty = polys.length > 0;
   scoutCandidates.forEach((cand, idx) => {
     const m = L.marker([cand.lat, cand.lng], { icon: scoutIcon() }).addTo(map);
-    m.on("click", () => scoutPopup(cand, idx));
+    m.on("click", () => { if (measure) { addMeasurePoint(m.getLatLng()); return; } scoutPopup(cand, idx); });
     scoutMarkers.push(m);
   });
   renderScoutPanel();
@@ -6254,13 +6318,15 @@ function renderBrief() {
         : `Legal light to ${fmtClock(ll.pmEnd)} · sunset ${fmtClock(ll.sunset)}`;
 
   const tops = briefTopStands();
-  let standLine, trendLine = "";
+  let standLine, trendLine = "", approachLine = "";
   if (tops.length) {
     standLine = "Top: " + tops.map((x) => `<b>${esc(x.st.name)}</b> ${x.r.score}`).join(" · ");
     const tr = tops
       .map((x) => { const t = standSitTrend(x.st); return t ? `${x.st.name} ${t.short}` : null; })
       .filter(Boolean);
     if (tr.length) trendLine = `<div class="brief-warn">⚠ ${esc(tr.join(" · "))}</div>`;
+    const ap = standApproach(tops[0].st);
+    if (ap) approachLine = `<div>${esc(tops[0].st.name)}: ${esc(ap.text)}</div>`;
   } else {
     standLine = `<span class="brief-dim">Add stands with winds set to get a ranking.</span>`;
   }
@@ -6277,6 +6343,7 @@ function renderBrief() {
       <div>${rainLine}</div>
       ${lightLine ? `<div>${lightLine}</div>` : ""}
       <div>${standLine}</div>
+      ${approachLine}
     </div>
     ${trendLine}
   </div>`;
@@ -6512,6 +6579,7 @@ function standEditor(st) {
     <textarea id="edNotes">${esc(st.notes || "")}</textarea>
     ${rec ? `<div class="rec"><b>Score ${r.score}/100.</b> ${rec}</div>` : `<div class="explain"><b>Score —</b></div>`}
     ${breakdown}
+    ${(() => { const a = standApproach(st); return a ? `<div class="explain" style="margin-top:4px;color:var(--good)">→ ${esc(a.text)}</div>` : ""; })()}
     ${(() => { const t = standSitTrend(st); return t ? `<div class="explain" style="margin-top:4px;color:var(--mid)">⚠ ${esc(t.text)}</div>` : ""; })()}
     ${(() => {
       const rl = standReliability(st);
