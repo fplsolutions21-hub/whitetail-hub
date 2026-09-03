@@ -1064,6 +1064,9 @@ details.fac .explain { margin-top: 4px; }
 .dp-coord:hover { color: #fff; }
 
 .dp-ruler.on { background: #ffd24a; }
+/* while measuring, no pin can be touched at all — taps fall through to the map and
+   snap to the nearest pin in code. this is the hard guarantee a pin won't get dragged. */
+.leaflet-container.measuring .leaflet-marker-pane { pointer-events: none; }
 .dp-measure {
   background: rgba(20,24,28,.9); color: #e8edf1;
   border: 1px solid var(--line); border-radius: 6px;
@@ -1308,7 +1311,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Ruler: pins locked</span>
+      <span class="build-tag">ruler v2 · pins inert</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -4091,9 +4094,22 @@ function renderMeasure() {
       measure.pts.length < 2 ? "tap a start, then more points" : `${fmtDist(total)}  ·  ${measure.pts.length} pts`;
   }
 }
+/* if a tap lands within ~20px of a placed marker, snap the point exactly onto it */
+function snapToMarker(latlng) {
+  const c = map.latLngToContainerPoint(latlng);
+  let best = null, bd = 22;
+  const all = []
+    .concat(Object.values(standMarkers), Object.values(signMarkers), Object.values(harvestMarkers), scoutMarkers || [], meMarker ? [meMarker] : []);
+  all.forEach((m) => {
+    if (!m || !m.getLatLng) return;
+    const d = c.distanceTo(map.latLngToContainerPoint(m.getLatLng()));
+    if (d < bd) { bd = d; best = m.getLatLng(); }
+  });
+  return best || latlng;
+}
 function addMeasurePoint(ll) {
   if (!measure) return;
-  measure.pts.push(ll);
+  measure.pts.push(snapToMarker(ll));
   renderMeasure();
 }
 function clearMeasure() {
@@ -4106,6 +4122,7 @@ function startMeasure() {
   if (placing) cancelPlace();
   measure = { pts: [], line: null, dots: [], labels: [], readout: null };
   document.body.style.cursor = "crosshair";
+  map.getContainer().classList.add("measuring"); // makes every pin inert (CSS) so none can be dragged
   const btn = $(".dp-ruler");
   if (btn) btn.classList.add("on");
   measureReadoutCtl = new MeasureReadout();
@@ -4121,6 +4138,7 @@ function stopMeasure() {
   if (measure.line) map.removeLayer(measure.line);
   measure = null;
   document.body.style.cursor = "";
+  map.getContainer().classList.remove("measuring");
   const btn = $(".dp-ruler");
   if (btn) btn.classList.remove("on");
   if (measureReadoutCtl) { map.removeControl(measureReadoutCtl); measureReadoutCtl = null; }
@@ -4188,6 +4206,7 @@ function enableLongPressMove(marker, handlers) {
   function docMove(e) { onMove(e); }
   function docUp(e) { onUp(e); }
   function arm() {
+    if (measure || placing) { cancel(); return; } // never move a pin while the ruler / a place flow is up
     armed = true;
     timer = null;
     if (lpCancelPending === cancel) lpCancelPending = null;
