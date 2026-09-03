@@ -1067,25 +1067,17 @@ details.fac .explain { margin-top: 4px; }
 /* while measuring, no pin can be touched at all — taps fall through to the map and
    snap to the nearest pin in code. this is the hard guarantee a pin won't get dragged. */
 .leaflet-container.measuring .leaflet-marker-pane { pointer-events: none; }
-.dp-measure {
-  background: rgba(20,24,28,.9); color: #e8edf1;
-  border: 1px solid var(--line); border-radius: 6px;
-  padding: 5px 8px; font-size: 12px; display: flex; align-items: center; gap: 10px;
-  box-shadow: 0 2px 10px rgba(0,0,0,.5);
-}
-.dp-measure-val { font-weight: 600; }
-.dp-measure-btns { display: flex; gap: 5px; }
-.dp-measure-btns button {
-  background: var(--panel-2); color: var(--text-dim);
-  border: 1px solid var(--line); border-radius: 4px;
-  padding: 3px 8px; font: inherit; font-size: 11px; cursor: pointer;
-}
-.dp-measure-btns button:hover { color: var(--text); }
 .measure-seg {
   background: rgba(20,24,28,.85); color: #ffd24a;
   border: 1px solid rgba(255,210,74,.4); border-radius: 3px;
   padding: 0 4px; font-size: 10.5px; font-weight: 700; white-space: nowrap;
   transform: translate(-50%, -50%); display: inline-block;
+}
+.measure-total {
+  background: #ffd24a; color: #17130e;
+  border-radius: 4px; padding: 1px 6px; font-size: 12px; font-weight: 800;
+  white-space: nowrap; box-shadow: 0 1px 4px rgba(0,0,0,.5);
+  transform: translate(-50%, -190%); display: inline-block;
 }
 
 #app.panel-hidden .leaflet-top.leaflet-left { margin-left: 46px; }
@@ -1311,7 +1303,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">ruler v2 · pins inert</span>
+      <span class="build-tag">ruler total on map</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -4048,7 +4040,7 @@ const CoordControl = L.Control.extend({
 let coordCtl = null;
 
 /* ---- distance ruler — tap points on the map, running yardage ---- */
-let measure = null; // { pts:[latlng], line, dots:[], labels:[], readout }
+let measure = null; // { pts:[latlng], line, dots:[], labels:[] }
 
 function fmtDist(m) {
   const yd = m * 1.09361;
@@ -4069,29 +4061,32 @@ function renderMeasure() {
   measure.labels = [];
   if (measure.line) { map.removeLayer(measure.line); measure.line = null; }
 
-  if (measure.pts.length) {
-    measure.line = L.polyline(measure.pts, { color: "#ffd24a", weight: 3, dashArray: "6 5", interactive: false }).addTo(map);
-    measure.pts.forEach((ll, i) => {
-      measure.dots.push(
-        L.circleMarker(ll, { radius: 4, color: "#ffd24a", weight: 2, fillColor: "#141a1e", fillOpacity: 1, interactive: false }).addTo(map)
+  if (!measure.pts.length) return;
+
+  measure.line = L.polyline(measure.pts, { color: "#ffd24a", weight: 3, dashArray: "6 5", interactive: false }).addTo(map);
+  measure.pts.forEach((ll, i) => {
+    measure.dots.push(
+      L.circleMarker(ll, { radius: 4, color: "#ffd24a", weight: 2, fillColor: "#141a1e", fillOpacity: 1, interactive: false }).addTo(map)
+    );
+    if (i > 0) {
+      const seg = map.distance(measure.pts[i - 1], ll);
+      const mid = L.latLng((measure.pts[i - 1].lat + ll.lat) / 2, (measure.pts[i - 1].lng + ll.lng) / 2);
+      measure.labels.push(
+        L.marker(mid, {
+          interactive: false,
+          icon: L.divIcon({ className: "", html: `<div class="measure-seg">${fmtDist(seg)}</div>`, iconSize: [1, 1] }),
+        }).addTo(map)
       );
-      if (i > 0) {
-        const seg = map.distance(measure.pts[i - 1], ll);
-        const mid = L.latLng((measure.pts[i - 1].lat + ll.lat) / 2, (measure.pts[i - 1].lng + ll.lng) / 2);
-        measure.labels.push(
-          L.marker(mid, {
-            interactive: false,
-            icon: L.divIcon({ className: "", html: `<div class="measure-seg">${fmtDist(seg)}</div>`, iconSize: [1, 1] }),
-          }).addTo(map)
-        );
-      }
-    });
-  }
-  const r = measure.readout;
-  if (r) {
-    const total = measureTotal();
-    r.querySelector(".dp-measure-val").textContent =
-      measure.pts.length < 2 ? "tap a start, then more points" : `${fmtDist(total)}  ·  ${measure.pts.length} pts`;
+    }
+  });
+  // running total sits on the last point
+  if (measure.pts.length >= 2) {
+    measure.labels.push(
+      L.marker(measure.pts[measure.pts.length - 1], {
+        interactive: false, zIndexOffset: 1000,
+        icon: L.divIcon({ className: "", html: `<div class="measure-total">${fmtDist(measureTotal())} total</div>`, iconSize: [1, 1] }),
+      }).addTo(map)
+    );
   }
 }
 /* if a tap lands within ~20px of a placed marker, snap the point exactly onto it */
@@ -4112,24 +4107,16 @@ function addMeasurePoint(ll) {
   measure.pts.push(snapToMarker(ll));
   renderMeasure();
 }
-function clearMeasure() {
-  if (!measure) return;
-  measure.pts = [];
-  renderMeasure();
-}
 function startMeasure() {
   if (measure) return;
   if (placing) cancelPlace();
-  measure = { pts: [], line: null, dots: [], labels: [], readout: null };
+  measure = { pts: [], line: null, dots: [], labels: [] };
   document.body.style.cursor = "crosshair";
   map.getContainer().classList.add("measuring"); // makes every pin inert (CSS) so none can be dragged
   const btn = $(".dp-ruler");
   if (btn) btn.classList.add("on");
-  measureReadoutCtl = new MeasureReadout();
-  map.addControl(measureReadoutCtl);
-  measure.readout = measureReadoutCtl._el;
   renderMeasure();
-  toast("Tap the map to measure — start, then each turn");
+  toast("Tap points to measure — tap the ruler again to finish");
 }
 function stopMeasure() {
   if (!measure) return;
@@ -4141,9 +4128,7 @@ function stopMeasure() {
   map.getContainer().classList.remove("measuring");
   const btn = $(".dp-ruler");
   if (btn) btn.classList.remove("on");
-  if (measureReadoutCtl) { map.removeControl(measureReadoutCtl); measureReadoutCtl = null; }
 }
-let measureReadoutCtl = null;
 
 const RulerControl = L.Control.extend({
   options: { position: "topright" },
@@ -4155,21 +4140,6 @@ const RulerControl = L.Control.extend({
       `<svg viewBox="0 0 24 24" width="16" height="16" style="display:block"><path fill="none" stroke="#333" stroke-width="2" stroke-linejoin="round" d="M3 8h18v8H3z"/><path stroke="#333" stroke-width="2" d="M7 8v3M11 8v4M15 8v3M19 8v4"/></svg>`;
     L.DomEvent.on(b, "click", L.DomEvent.stop).on(b, "click", () => (measure ? stopMeasure() : startMeasure()));
     return b;
-  },
-});
-
-const MeasureReadout = L.Control.extend({
-  options: { position: "bottomleft" },
-  onAdd() {
-    const d = L.DomUtil.create("div", "dp-measure");
-    d.innerHTML =
-      `<span class="dp-measure-val">tap a start, then more points</span>` +
-      `<span class="dp-measure-btns"><button data-m="clear">Clear</button><button data-m="done">Done</button></span>`;
-    L.DomEvent.disableClickPropagation(d);
-    d.querySelector('[data-m="clear"]').onclick = clearMeasure;
-    d.querySelector('[data-m="done"]').onclick = stopMeasure;
-    this._el = d;
-    return d;
   },
 });
 
