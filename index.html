@@ -1308,7 +1308,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Approach direction</span>
+      <span class="build-tag">Ruler: pins locked</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -4209,6 +4209,7 @@ function enableLongPressMove(marker, handlers) {
     document.removeEventListener("mouseup", docUp);
   }
   function onDown(e) {
+    if (measure || placing) return; // ruler / placing mode owns map taps — don't grab the pin
     if (e.touches && e.touches.length > 1) { cancel(); return; }
     if (armed) return;
     startPt = lpEvtPoint(e);
