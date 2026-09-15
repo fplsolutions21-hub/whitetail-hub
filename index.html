@@ -1304,7 +1304,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Walk breadcrumb</span>
+      <span class="build-tag">Date auto-fix</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -2614,6 +2614,122 @@ const BASE_LAYERS = {
   },
 };
 
+/* ---- offline tile cache (IndexedDB) — any tile you've viewed, or explicitly
+   downloaded, keeps showing with zero signal ---- */
+const TILE_DB_NAME = "deerPlannerTiles";
+let tileDBPromise = null;
+function openTileDB() {
+  if (tileDBPromise) return tileDBPromise;
+  tileDBPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(TILE_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains("tiles")) req.result.createObjectStore("tiles");
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      if (db.objectStoreNames.contains("tiles")) { resolve(db); return; }
+      // store missing (stale/partial db from some other opener) — bump the version to force-create it
+      const nextV = db.version + 1;
+      db.close();
+      const req2 = indexedDB.open(TILE_DB_NAME, nextV);
+      req2.onupgradeneeded = () => {
+        if (!req2.result.objectStoreNames.contains("tiles")) req2.result.createObjectStore("tiles");
+      };
+      req2.onsuccess = () => resolve(req2.result);
+      req2.onerror = () => reject(req2.error);
+    };
+    req.onerror = () => reject(req.error);
+  });
+  return tileDBPromise;
+}
+const tileKey = (layer, z, x, y) => `${layer}/${z}/${x}/${y}`;
+function getTileBlob(key) {
+  return openTileDB()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          try {
+            const req = db.transaction("tiles", "readonly").objectStore("tiles").get(key);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => resolve(null);
+          } catch (e) { resolve(null); }
+        })
+    )
+    .catch(() => null);
+}
+function putTileBlob(key, blob) {
+  return openTileDB()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          try {
+            const tx = db.transaction("tiles", "readwrite");
+            tx.objectStore("tiles").put(blob, key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          } catch (e) { resolve(false); }
+        })
+    )
+    .catch(() => false);
+}
+function countTiles() {
+  return openTileDB()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          try {
+            const req = db.transaction("tiles", "readonly").objectStore("tiles").count();
+            req.onsuccess = () => resolve(req.result || 0);
+            req.onerror = () => resolve(0);
+          } catch (e) { resolve(0); }
+        })
+    )
+    .catch(() => 0);
+}
+function clearTiles() {
+  return openTileDB()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          try {
+            const tx = db.transaction("tiles", "readwrite");
+            tx.objectStore("tiles").clear();
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          } catch (e) { resolve(false); }
+        })
+    )
+    .catch(() => false);
+}
+
+/* a tile layer that reads/writes the cache above — falls back to a plain
+   image load if fetch/IndexedDB ever fail, so it's never worse than before */
+const OfflineTileLayer = L.TileLayer.extend({
+  createTile(coords, done) {
+    const img = document.createElement("img");
+    img.alt = "";
+    const key = tileKey(this._dpName, coords.z, coords.x, coords.y);
+    const url = this.getTileUrl(coords);
+    getTileBlob(key)
+      .then((blob) => {
+        if (blob) { img.src = URL.createObjectURL(blob); done(null, img); return; }
+        return fetch(url, { mode: "cors" })
+          .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("tile " + r.status))))
+          .then((b) => {
+            img.src = URL.createObjectURL(b);
+            done(null, img);
+            putTileBlob(key, b);
+          });
+      })
+      .catch(() => {
+        img.onload = () => done(null, img);
+        img.onerror = (e) => done(e, img);
+        img.src = url;
+      });
+    return img;
+  },
+});
+
 /* ------------------------------------------------------------- compass 8 -- */
 const DIRS8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 const dirToDeg = (d) => DIRS8.indexOf(d) * 45;
@@ -2707,6 +2823,9 @@ function loadState() {
         migrateStands(s);
         migrateSits(s);
         migrateToBoundaryModel(s);
+        // the Hunt date sticks in storage from whenever you last picked it — if you
+        // haven't touched it since, jump it back to today instead of showing a stale day
+        if (s.settings.date && s.settings.date < todayISO()) s.settings.date = todayISO();
         return s;
       }
     }
@@ -3543,7 +3662,14 @@ function initMap() {
   L.control.scale({ imperial: true, metric: false, position: "bottomright" }).addTo(map);
 
   Object.entries(BASE_LAYERS).forEach(([name, def]) => {
-    layerObjs[name] = L.tileLayer(def.url, def.opts);
+    const ly = new OfflineTileLayer(def.url, def.opts);
+    ly._dpName = name;
+    ly.on("tileunload", (e) => {
+      if (e.tile && e.tile.src && e.tile.src.indexOf("blob:") === 0) {
+        try { URL.revokeObjectURL(e.tile.src); } catch (err) {}
+      }
+    });
+    layerObjs[name] = ly;
   });
   (layerObjs[state.settings.layer] || layerObjs.Satellite).addTo(map);
   L.control.layers(layerObjs, {}, { position: "topright" }).addTo(map);
@@ -5178,6 +5304,92 @@ function paddedBounds() {
   return b.pad(0.15);
 }
 
+/* ---- offline maps: predownload the current view across a working zoom range ---- */
+const OFFLINE_ZOOMS = [13, 14, 15, 16, 17];
+function lngLatToTile(lng, lat, z) {
+  const n = Math.pow(2, z);
+  const x = Math.floor(((lng + 180) / 360) * n);
+  const rad = (lat * Math.PI) / 180;
+  const y = Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n);
+  return { x, y };
+}
+function planOfflineDownload() {
+  const bounds = paddedBounds();
+  const nw = bounds.getNorthWest(), se = bounds.getSouthEast();
+  const name = state.settings.layer || "Satellite";
+  const list = [];
+  OFFLINE_ZOOMS.forEach((z) => {
+    const p1 = lngLatToTile(nw.lng, nw.lat, z), p2 = lngLatToTile(se.lng, se.lat, z);
+    const x0 = Math.min(p1.x, p2.x), x1 = Math.max(p1.x, p2.x);
+    const y0 = Math.min(p1.y, p2.y), y1 = Math.max(p1.y, p2.y);
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) list.push({ z, x, y });
+  });
+  return { name, list };
+}
+
+let offlineBusy = false;
+async function downloadOfflineArea() {
+  if (offlineBusy) return;
+  const { name, list } = planOfflineDownload();
+  if (list.length > 2500) {
+    toast("Zoom in a bit first — that area is too big to grab in one go");
+    return;
+  }
+  const mb = Math.max(1, Math.round((list.length * 9) / 1024));
+  if (!confirm(`Download ~${list.length} map tiles (roughly ${mb} MB) for offline use in this area?`)) return;
+  offlineBusy = true;
+  renderOfflinePanel();
+  const layer = layerObjs[name];
+  let done = 0, failed = 0, idx = 0;
+  async function worker() {
+    while (idx < list.length) {
+      const item = list[idx++];
+      const key = tileKey(name, item.z, item.x, item.y);
+      if (!(await getTileBlob(key))) {
+        try {
+          const r = await fetch(layer.getTileUrl(item), { mode: "cors" });
+          if (r.ok) await putTileBlob(key, await r.blob());
+          else failed++;
+        } catch (e) { failed++; }
+      }
+      done++;
+      const s = $("#offlineStatus");
+      if (s) s.textContent = `Downloading… ${done} / ${list.length}`;
+    }
+  }
+  await Promise.all(Array.from({ length: 6 }, worker));
+  offlineBusy = false;
+  toast(failed ? `Saved — ${failed} tile${failed === 1 ? "" : "s"} didn't come through` : "Offline maps saved for this area");
+  renderOfflinePanel();
+}
+
+function renderOfflinePanel() {
+  const box = $("#offlineBox");
+  if (!box) return;
+  box.innerHTML = `
+    <div class="hint" id="offlineStatus">${offlineBusy ? "Working…" : "Checking what's saved…"}</div>
+    <div class="btn-row">
+      <button class="btn btn-sm" id="btnDownloadOffline"${offlineBusy ? " disabled" : ""}>Download this view for offline</button>
+      <button class="btn btn-sm btn-ghost" id="btnClearOffline">Clear offline maps</button>
+    </div>
+    <div class="hint">Grabs the <b>${esc(state.settings.layer || "Satellite")}</b> tiles for the area you're looking at, zoomed out to zoomed in. Do this on wifi before you head out — it also happens quietly on its own for any spot you've simply looked at while online.</div>`;
+  if (!offlineBusy)
+    countTiles().then((n) => {
+      const s = $("#offlineStatus");
+      if (s && !offlineBusy) s.textContent = n ? `${n} tiles saved for offline` : "No tiles saved yet";
+    });
+  const db = $("#btnDownloadOffline");
+  if (db) db.onclick = downloadOfflineArea;
+  const cb = $("#btnClearOffline");
+  if (cb)
+    cb.onclick = async () => {
+      if (!confirm("Delete all saved offline map tiles?")) return;
+      await clearTiles();
+      renderOfflinePanel();
+      toast("Offline maps cleared");
+    };
+}
+
 async function loadTerrainForView(opts) {
   opts = opts || {};
   if (!window.DPTerrain) {
@@ -5550,6 +5762,7 @@ function renderPanel() {
       true
     ) +
       sectionShell("terrain", "Terrain", `<div id="terrainBox"></div>`, false, true) +
+      sectionShell("offline", "Offline maps", `<div id="offlineBox"></div>`, true, true) +
       sectionShell("scout", "Scout", `<div id="scoutBox"></div>`, false, true) +
       sectionShell("signs", "Sign", `<div id="signsBox"></div>`, true, true) +
       sectionShell("research", "Scoring", `<div id="researchBox"></div>`, true, true),
@@ -5563,6 +5776,7 @@ function renderPanel() {
   renderBrief();
   renderMapTools();
   renderTerrainPanel();
+  renderOfflinePanel();
   renderResearchPanel();
   renderSignsPanel();
   renderHarvestPanel();
@@ -6245,6 +6459,7 @@ function wirePanel() {
     b.onclick = () => {
       const sec = b.closest(".sec");
       sec.classList.toggle("collapsed");
+      if (!sec.classList.contains("collapsed") && sec.dataset.sec === "offline") renderOfflinePanel();
     };
   });
 
@@ -7194,6 +7409,21 @@ function init() {
 
   fetchWeather(false);
   setInterval(() => fetchWeather(false), 30 * 60 * 1000);
+
+  // if the app's just been sitting open (backgrounded overnight, say) and a new
+  // day's arrived since, jump the Hunt date forward instead of leaving it stale
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (state.settings.date && state.settings.date < todayISO()) {
+      state.settings.date = todayISO();
+      saveState();
+      const di = $("#huntDate");
+      if (di) di.value = state.settings.date;
+      updateHuntMomentHint();
+      renderStands();
+      toast("Jumped the Hunt date to today");
+    }
+  });
 
   // restore saved terrain (the last-used area)
   if (window.DPTerrain) {
