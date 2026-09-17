@@ -1081,6 +1081,20 @@ details.fac .explain { margin-top: 4px; }
   transform: translate(-50%, -190%); display: inline-block;
 }
 
+/* ---- "Go to" compass HUD — fixed over the map, not part of Leaflet ---- */
+.nav-compass {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  z-index: 2500; display: flex; align-items: center; gap: 10px;
+  background: rgba(20,24,28,.9); border: 1px solid rgba(95,208,138,.5);
+  border-radius: 14px; padding: 8px 14px 8px 8px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.5);
+}
+#navArrowG { transform-origin: 50px 50px; transition: transform .25s ease; }
+.nav-compass-info { display: flex; flex-direction: column; gap: 1px; align-items: flex-start; }
+.nav-compass-dist { font-size: 18px; font-weight: 800; color: var(--text); line-height: 1.1; }
+.nav-compass-name { font-size: 11px; color: var(--text-dim); max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-compass .btn { margin-top: 3px; }
+
 #app.panel-hidden .leaflet-top.leaflet-left { margin-left: 46px; }
 
 /* pinned address search — sits above every collapsible section, never over the map */
@@ -1304,7 +1318,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Place-mode fixes</span>
+      <span class="build-tag">Trail show/hide</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -3015,6 +3029,7 @@ function seedState() {
       terrainOpacity: 65,
       terrainShow: true,
       terrainZoom: 14,
+      showTrails: true,
       preset: "balanced",
       weights: null, // null = use preset
       windModel: "pennstate",
@@ -3837,13 +3852,14 @@ function updateMe(pos) {
   if (btn) btn.classList.add("has-fix");
   if (typeof trackTick === "function") trackTick(meLatLng[0], meLatLng[1], meAcc);
   if (typeof walkTrackTick === "function") walkTrackTick(meLatLng[0], meLatLng[1]);
+  if (typeof navTick === "function") navTick(meLatLng[0], meLatLng[1]);
 }
 
 /* auto–shut GPS off after a while so a long sit doesn't drain the phone */
 function armGpsTimer() {
   clearTimeout(geoTimer);
   const min = state.settings.gpsAutoOffMin;
-  if (!min || trackingId || walkRec) return; // 0 = never; never time out mid–blood-trail or mid-walk
+  if (!min || trackingId || walkRec || navTarget) return; // 0 = never; never time out mid–blood-trail, mid-walk, or mid-navigate
   geoTimer = setTimeout(() => {
     if (locateOn && !trackingId) {
       toggleLocate();
@@ -3897,6 +3913,7 @@ function stopLocate() {
   meLatLng = null;
   if (typeof clearScent === "function") clearScent();
   if (walkRec) stopWalkTrack(); // can't record a walk without GPS
+  if (navTarget) stopNavTo(); // can't navigate without GPS
 }
 function toggleLocate() {
   locateOn = !locateOn;
@@ -4002,6 +4019,102 @@ const WalkControl = L.Control.extend({
     return b;
   },
 });
+
+/* ---- "Go to" — live distance + compass arrow from your GPS to a chosen stand ---- */
+let navTarget = null; // { standId, lat, lng, name, line }
+let navHeading = null; // device compass heading in degrees, if granted
+let navHeadingHandler = null;
+let navHudEl = null;
+
+function startHeadingWatch() {
+  if (navHeadingHandler) return;
+  navHeadingHandler = (e) => {
+    let h = null;
+    if (typeof e.webkitCompassHeading === "number") h = e.webkitCompassHeading; // true heading on iOS Safari
+    else if (e.absolute && typeof e.alpha === "number") h = (360 - e.alpha) % 360; // best-effort elsewhere
+    if (h != null) { navHeading = h; updateNavHud(); }
+  };
+  const attach = () => window.addEventListener("deviceorientation", navHeadingHandler, true);
+  try {
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      DeviceOrientationEvent.requestPermission().then((r) => { if (r === "granted") attach(); }).catch(() => {});
+    } else {
+      attach();
+    }
+  } catch (e) {}
+}
+function stopHeadingWatch() {
+  if (navHeadingHandler) { try { window.removeEventListener("deviceorientation", navHeadingHandler, true); } catch (e) {} navHeadingHandler = null; }
+  navHeading = null;
+}
+
+function buildNavHud() {
+  if (navHudEl) return;
+  const d = document.createElement("div");
+  d.className = "nav-compass";
+  d.innerHTML = `
+    <svg viewBox="0 0 100 100" width="76" height="76">
+      <circle cx="50" cy="50" r="46" fill="rgba(20,24,28,.92)" stroke="#5fd08a" stroke-width="2"/>
+      <text x="50" y="15" text-anchor="middle" fill="#8ee6b0" font-size="11" font-weight="800">N</text>
+      <g id="navArrowG"><polygon points="50,18 43,58 50,50 57,58" fill="#5fd08a"/></g>
+    </svg>
+    <div class="nav-compass-info">
+      <div class="nav-compass-dist" id="navDist">locating…</div>
+      <div class="nav-compass-name" id="navName"></div>
+      <button type="button" class="btn btn-sm btn-ghost" id="navStopBtn">Stop</button>
+    </div>`;
+  document.body.appendChild(d);
+  d.querySelector("#navStopBtn").onclick = () => stopNavTo();
+  navHudEl = d;
+}
+function removeNavHud() {
+  if (navHudEl) { navHudEl.remove(); navHudEl = null; }
+}
+function updateNavHud() {
+  if (!navTarget || !navHudEl) return;
+  const nameEl = $("#navName"), distEl = $("#navDist"), g = $("#navArrowG");
+  if (nameEl) nameEl.textContent = navTarget.name;
+  if (!meLatLng) { if (distEl) distEl.textContent = "locating…"; return; }
+  const brg = bearingDeg(meLatLng[0], meLatLng[1], navTarget.lat, navTarget.lng);
+  const distM = map.distance(meLatLng, [navTarget.lat, navTarget.lng]);
+  if (distEl) distEl.textContent = fmtDist(distM);
+  const rel = navHeading != null ? (brg - navHeading + 360) % 360 : brg;
+  if (g) g.setAttribute("transform", `rotate(${rel} 50 50)`);
+}
+
+function navTick(lat, lng) {
+  if (!navTarget) return;
+  const from = L.latLng(lat, lng);
+  const to = L.latLng(navTarget.lat, navTarget.lng);
+  const distM = map.distance(from, to);
+  if (navTarget.line) map.removeLayer(navTarget.line);
+  navTarget.line = L.polyline([from, to], { color: "#5fd08a", weight: 3, dashArray: "2 9", interactive: false }).addTo(map);
+  updateNavHud();
+  if (distM < 15) {
+    toast(`You've arrived at ${navTarget.name}`);
+    stopNavTo();
+  }
+}
+function startNavTo(lat, lng, name, standId) {
+  if (navTarget && navTarget.standId === standId) { stopNavTo(); return; }
+  if (navTarget) stopNavTo();
+  navTarget = { standId, lat, lng, name, line: null };
+  if (!locateOn) toggleLocate();
+  else armGpsTimer();
+  buildNavHud();
+  startHeadingWatch();
+  toast(`Navigating to ${name} — tap Stop when you're done`);
+  if (meLatLng) navTick(meLatLng[0], meLatLng[1]);
+  else updateNavHud();
+}
+function stopNavTo() {
+  if (!navTarget) return;
+  if (navTarget.line) map.removeLayer(navTarget.line);
+  navTarget = null;
+  removeNavHud();
+  stopHeadingWatch();
+  renderStands();
+}
 
 /* ---- scent drift cone — a 20-second on-demand check (tap a stand or your dot) ---- */
 let scentLayer = null;
@@ -4983,6 +5096,7 @@ function flattenLatLngs(a) {
 }
 
 function addShapeToMap(shape) {
+  if (shape.kind === "trail" && state.settings.showTrails === false) return;
   const style = SHAPE_STYLE[shape.kind];
   const layer =
     shape.kind === "boundary"
@@ -5143,6 +5257,13 @@ function renderMapTools() {
         <button class="btn btn-ghost btn-sm" id="btnCornerTrail">Trail by coords</button>
       </div>
       ${
+        (state.shapes || []).some((s) => s.kind === "trail")
+          ? `<label class="fld"><input type="checkbox" id="showTrails" ${
+              state.settings.showTrails !== false ? "checked" : ""
+            } /> Show trails on map</label>`
+          : ""
+      }
+      ${
         shapeRows
           ? `<label class="fld">Drawn lines</label><div class="shape-list">${shapeRows}</div>
              <div class="btn-row"><button class="btn btn-sm btn-danger" id="btnClearShapes">Delete all lines</button></div>`
@@ -5153,6 +5274,15 @@ function renderMapTools() {
     $("#btnDrawTrail").onclick = () => startDraw("trail");
     $("#btnCornerBoundary").onclick = () => startCornerEditor("boundary");
     $("#btnCornerTrail").onclick = () => startCornerEditor("trail");
+    const st = $("#showTrails");
+    if (st)
+      st.onchange = (e) => {
+        state.settings.showTrails = e.target.checked;
+        saveState();
+        drawnItems.clearLayers();
+        pShapes().forEach(addShapeToMap);
+        toast(e.target.checked ? "Trails shown" : "Trails hidden — your saved trails are safe, just not drawn");
+      };
 
     $$("[data-shpa]").forEach((b) => {
       b.onclick = () => {
@@ -5663,6 +5793,7 @@ function jumpToArea(id) {
 function onActiveAreaChanged() {
   selectedStandId = null;
   editingStandId = null;
+  if (navTarget) stopNavTo();
   clearScoutMarkers();
   scoutCandidates = [];
   renderStandMarkers();
@@ -6780,11 +6911,13 @@ function renderStands(focusEditor) {
 
   const sel = state.stands.find((s) => s.id === selectedStandId);
   const editing = sel && editingStandId === sel.id;
+  const navingThis = sel && navTarget && navTarget.standId === sel.id;
   const selBar =
     sel && !editing
       ? `<div class="btn-row" style="margin-top:8px">
            <button class="btn btn-sm" id="btnEditStand">Edit ${esc(sel.name)}</button>
            <button class="btn btn-sm btn-ghost" id="btnStandMap">Show on map</button>
+           <button class="btn btn-sm ${navingThis ? "" : "btn-ghost"}" id="btnGoTo">${navingThis ? "Stop navigating" : "Go to"}</button>
          </div>`
       : "";
   list.innerHTML = bestLine + rows + selBar + (editing ? standEditor(sel) : "");
@@ -6804,6 +6937,12 @@ function renderStands(focusEditor) {
     bm.onclick = () => {
       map.setView([sel.lat, sel.lng], Math.max(map.getZoom(), 16));
       if (window.matchMedia("(max-width:640px)").matches) hidePanel();
+    };
+  const gt = $("#btnGoTo");
+  if (gt)
+    gt.onclick = () => {
+      startNavTo(sel.lat, sel.lng, sel.name, sel.id);
+      renderStands();
     };
   if (editing) wireEditor(sel);
   if (focusEditor && editing) {
