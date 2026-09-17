@@ -1304,7 +1304,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Date auto-fix</span>
+      <span class="build-tag">Place-mode fixes</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -3823,6 +3823,8 @@ function updateMe(pos) {
   if (!meMarker) {
     meMarker = L.marker(meLatLng, { icon: meIcon(), zIndexOffset: 2000, title: "Tap for a 20-sec scent check" }).addTo(map);
     meMarker.on("click", () => {
+      // placing a stand/sign/harvest wins — tapping your own dot drops it right there
+      if (placing && meLatLng) { finalizePlace(meLatLng[0], meLatLng[1]); return; }
       if (measure && meLatLng) { addMeasurePoint(L.latLng(meLatLng[0], meLatLng[1])); return; }
       if (meLatLng) showScent(meLatLng[0], meLatLng[1]);
     });
@@ -4199,7 +4201,12 @@ const AddControl = L.Control.extend({
     L.DomEvent.disableClickPropagation(wrap);
     L.DomEvent.disableScrollPropagation(wrap);
     const btn = wrap.querySelector(".dp-add");
-    L.DomEvent.on(btn, "click", L.DomEvent.stop).on(btn, "click", () => wrap.classList.toggle("open"));
+    L.DomEvent.on(btn, "click", L.DomEvent.stop).on(btn, "click", () => {
+      wrap.classList.toggle("open");
+      // hide the panel the moment you open this, not after you've picked & started
+      // aiming — otherwise the map view changes shape right as you're lining up a tap
+      if (wrap.classList.contains("open") && window.matchMedia("(max-width:640px)").matches) hidePanel();
+    });
     wrap.querySelectorAll("[data-add]").forEach((b) => {
       b.onclick = () => {
         wrap.classList.remove("open");
@@ -7424,6 +7431,10 @@ function init() {
       toast("Jumped the Hunt date to today");
     }
   });
+
+  // keep Leaflet's own size cache honest across orientation flips and the mobile
+  // browser chrome (address bar) showing/hiding, so taps land where you tapped
+  window.addEventListener("resize", () => { try { map && map.invalidateSize(); } catch (e) {} });
 
   // restore saved terrain (the last-used area)
   if (window.DPTerrain) {
