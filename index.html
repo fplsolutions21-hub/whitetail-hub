@@ -1320,7 +1320,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Trail labels off</span>
+      <span class="build-tag">Explicit move</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -3705,6 +3705,10 @@ function initMap() {
   map.on(L.Draw.Event.CREATED, onDrawCreated);
 
   map.on("click", (e) => {
+    if (movingPin) {
+      finalizeMovePin(e.latlng.lat, e.latlng.lng);
+      return;
+    }
     if (placing) {
       finalizePlace(e.latlng.lat, e.latlng.lng);
       return;
@@ -3722,7 +3726,8 @@ function initMap() {
     if (window.DPTerrain && DPTerrain.current) terrainReadoutPopup(e.latlng);
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && placing) cancelPlace();
+    if (e.key === "Escape" && movingPin) cancelMovePin();
+    else if (e.key === "Escape" && placing) cancelPlace();
     else if (e.key === "Escape" && measure) stopMeasure();
   });
   map.on("popupclose", () => closeHarvestTips());
@@ -3750,6 +3755,7 @@ function initMap() {
 /* ---- placing new stands / signs / harvests ---- */
 function beginPlace(kind, type) {
   if (measure) stopMeasure();
+  if (movingPin) cancelMovePin();
   placing = { kind, type: type || null };
   document.body.style.cursor = "crosshair";
   const what =
@@ -3784,6 +3790,55 @@ function finalizePlace(lat, lng) {
   else if (p.kind === "shot") setShotSpot(lat, lng);
   else if (p.kind === "blood") addBloodMark(lat, lng, p.last);
   else createSign(p.type, lat, lng);
+}
+
+/* ---- moving an existing stand / sign — only ever starts from an explicit
+   "Move" button, never from touching the pin itself, so a plain tap can't
+   drag anything by accident. Tap Move, then tap the map where it should go. */
+let movingPin = null; // { kind:'stand'|'sign', id }
+function movingPinMarker() {
+  if (!movingPin) return null;
+  return movingPin.kind === "stand" ? standMarkers[movingPin.id] : signMarkers[movingPin.id];
+}
+function beginMovePin(kind, id) {
+  if (movingPin) cancelMovePin();
+  movingPin = { kind, id };
+  document.body.style.cursor = "crosshair";
+  const mk = movingPinMarker();
+  const el = mk && mk.getElement();
+  if (el) el.classList.add("marker-armed");
+  toast("Tap the map where it should go (Esc cancels)");
+  if (window.matchMedia("(max-width:640px)").matches) hidePanel();
+}
+function cancelMovePin() {
+  const mk = movingPinMarker();
+  const el = mk && mk.getElement();
+  if (el) el.classList.remove("marker-armed");
+  movingPin = null;
+  document.body.style.cursor = "";
+}
+function finalizeMovePin(lat, lng) {
+  if (!movingPin) return;
+  const { kind, id } = movingPin;
+  cancelMovePin();
+  if (kind === "stand") {
+    const st = state.stands.find((s) => s.id === id);
+    if (!st) return;
+    st.lat = lat;
+    st.lng = lng;
+    saveState();
+    renderStandMarkers();
+    renderStands();
+  } else {
+    const sg = (state.signs || []).find((s) => s.id === id);
+    if (!sg) return;
+    sg.lat = lat;
+    sg.lng = lng;
+    saveState();
+    renderSignMarkers();
+    renderSignsPanel();
+  }
+  toast("Moved");
 }
 
 /* accept "38.93, -88.96", "38.93 -88.96", "N38.93 W88.96", basic DMS */
@@ -4461,6 +4516,7 @@ function addMeasurePoint(ll) {
 function startMeasure() {
   if (measure) return;
   if (placing) cancelPlace();
+  if (movingPin) cancelMovePin();
   measure = { pts: [], line: null, dots: [], labels: [] };
   document.body.style.cursor = "crosshair";
   map.getContainer().classList.add("measuring"); // makes every pin inert (CSS) so none can be dragged
@@ -5647,14 +5703,6 @@ function renderStandMarkers() {
     const sc = scoreStand(st).score;
     const m = L.marker([st.lat, st.lng], { icon: standIcon(st, sc), draggable: false });
     m.on("click", () => { if (measure) { addMeasurePoint(m.getLatLng()); return; } selectStand(st.id); });
-    enableLongPressMove(m, {
-      onEnd: (ll) => {
-        st.lat = ll.lat;
-        st.lng = ll.lng;
-        saveState();
-        renderStands();
-      },
-    });
     m.addTo(map);
     standMarkers[st.id] = m;
   });
@@ -5716,13 +5764,6 @@ function renderSignMarkers() {
   pSigns().forEach((sign) => {
     const m = L.marker([sign.lat, sign.lng], { icon: signIcon(sign), draggable: false });
     m.on("click", () => { if (measure) { addMeasurePoint(m.getLatLng()); return; } signPopup(sign, m); });
-    enableLongPressMove(m, {
-      onEnd: (ll) => {
-        sign.lat = ll.lat;
-        sign.lng = ll.lng;
-        saveState();
-      },
-    });
     m.addTo(map);
     signMarkers[sign.id] = m;
   });
@@ -5752,6 +5793,7 @@ function signPopup(sign, marker) {
     <div style="display:flex;gap:6px;margin-top:4px">
       <button class="btn btn-sm" data-a="save">Save</button>
       <button class="btn btn-sm btn-ghost" data-a="copy">Copy coords</button>
+      <button class="btn btn-sm btn-ghost" data-a="move">Move</button>
       <button class="btn btn-sm btn-danger" data-a="del">Delete</button>
     </div>`;
   div.querySelector('[data-a="save"]').onclick = () => {
@@ -5764,6 +5806,10 @@ function signPopup(sign, marker) {
     map.closePopup();
   };
   div.querySelector('[data-a="copy"]').onclick = () => copyCoords(sign.lat, sign.lng);
+  div.querySelector('[data-a="move"]').onclick = () => {
+    map.closePopup();
+    beginMovePin("sign", sign.id);
+  };
   div.querySelector('[data-a="del"]').onclick = () => {
     state.signs = state.signs.filter((s) => s.id !== sign.id);
     saveState();
@@ -6944,6 +6990,7 @@ function renderStands(focusEditor) {
       ? `<div class="btn-row" style="margin-top:8px">
            <button class="btn btn-sm" id="btnEditStand">Edit ${esc(sel.name)}</button>
            <button class="btn btn-sm btn-ghost" id="btnStandMap">Show on map</button>
+           <button class="btn btn-sm btn-ghost" id="btnMoveStand">Move</button>
            <button class="btn btn-sm ${navingThis ? "" : "btn-ghost"}" id="btnGoTo">${navingThis ? "Stop navigating" : "Go to"}</button>
          </div>`
       : "";
@@ -6965,6 +7012,8 @@ function renderStands(focusEditor) {
       map.setView([sel.lat, sel.lng], Math.max(map.getZoom(), 16));
       if (window.matchMedia("(max-width:640px)").matches) hidePanel();
     };
+  const mv = $("#btnMoveStand");
+  if (mv) mv.onclick = () => beginMovePin("stand", sel.id);
   const gt = $("#btnGoTo");
   if (gt)
     gt.onclick = () => {
