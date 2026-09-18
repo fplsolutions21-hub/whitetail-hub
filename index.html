@@ -827,7 +827,7 @@ textarea { resize: vertical; min-height: 44px; }
 .btn-ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--line); }
 .btn-ghost:hover { color: var(--text); }
 .btn-sm { padding: 5px 9px; font-size: 12px; }
-.btn-row { display: flex; gap: 8px; margin-top: 12px; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .btn-danger { background: transparent; border: 1px solid var(--bad); color: var(--bad); }
 
 .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
@@ -1096,6 +1096,30 @@ details.fac .explain { margin-top: 4px; }
 .nav-compass-name { font-size: 11px; color: var(--text-dim); max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-compass .btn { margin-top: 3px; }
 
+/* ---- field photos — gallery modal + full-image viewer ---- */
+.photo-viewer {
+  position: fixed; inset: 0; background: rgba(0,0,0,.86); z-index: 4000;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.photo-viewer-inner {
+  max-width: 100%; max-height: 100%; width: 420px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 12px;
+}
+.photo-viewer-inner img {
+  max-width: 100%; max-height: 70vh; border-radius: 8px; object-fit: contain;
+  align-self: center; background: #000;
+}
+.photo-viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text); }
+.photo-viewer-bar { display: flex; gap: 8px; justify-content: center; }
+.photo-grid { display: flex; flex-wrap: wrap; gap: 8px; overflow-y: auto; max-height: 65vh; padding: 2px; }
+.photo-thumb { width: 84px; height: 84px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); cursor: pointer; flex: 0 0 auto; }
+.photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-add {
+  width: 84px; height: 84px; border-radius: 8px; border: 1px dashed rgba(255,255,255,.35);
+  background: none; color: var(--text-dim); font-size: 26px; cursor: pointer; flex: 0 0 auto;
+}
+.photo-add:hover { background: rgba(255,255,255,.06); }
+
 #app.panel-hidden .leaflet-top.leaflet-left { margin-left: 46px; }
 
 /* pinned address search — sits above every collapsible section, never over the map */
@@ -1320,7 +1344,8 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Explicit move</span>
+      <input type="file" id="photoFile" accept="image/*" multiple hidden />
+      <span class="build-tag">Photos</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -2716,6 +2741,164 @@ function clearTiles() {
         })
     )
     .catch(() => false);
+}
+
+/* ---- field photos (IndexedDB) — a stand/sign can carry photos taken on the
+   spot. Stored as resized Blobs, keyed by an owner (kind+id), completely
+   separate from `state` so Export/Import and localStorage stay small. ---- */
+const PHOTO_DB_NAME = "deerPlannerPhotos";
+let photoDBPromise = null;
+function openPhotoDB() {
+  if (photoDBPromise) return photoDBPromise;
+  photoDBPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(PHOTO_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("photos")) {
+        const store = db.createObjectStore("photos", { keyPath: "id" });
+        store.createIndex("ownerKey", "ownerKey", { unique: false });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return photoDBPromise;
+}
+const photoOwnerKey = (kind, id) => `${kind}:${id}`;
+function addPhoto(kind, id, blob) {
+  const rec = { id: uid(), ownerKey: photoOwnerKey(kind, id), ts: Date.now(), blob };
+  return openPhotoDB()
+    .then(
+      (db) =>
+        new Promise((resolve, reject) => {
+          const tx = db.transaction("photos", "readwrite");
+          tx.objectStore("photos").put(rec);
+          tx.oncomplete = () => resolve(rec);
+          tx.onerror = () => reject(tx.error);
+        })
+    )
+    .catch(() => null);
+}
+function getPhotos(kind, id) {
+  return openPhotoDB()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          try {
+            const req = db.transaction("photos", "readonly").objectStore("photos").index("ownerKey").getAll(photoOwnerKey(kind, id));
+            req.onsuccess = () => resolve((req.result || []).sort((a, b) => a.ts - b.ts));
+            req.onerror = () => resolve([]);
+          } catch (e) { resolve([]); }
+        })
+    )
+    .catch(() => []);
+}
+function deletePhoto(photoId) {
+  return openPhotoDB()
+    .then(
+      (db) =>
+        new Promise((resolve) => {
+          const tx = db.transaction("photos", "readwrite");
+          tx.objectStore("photos").delete(photoId);
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+        })
+    )
+    .catch(() => false);
+}
+function deletePhotosFor(kind, id) {
+  return getPhotos(kind, id).then((list) => Promise.all(list.map((p) => deletePhoto(p.id))));
+}
+/* shrink a phone photo before it ever touches storage — a 12MP iPhone photo
+   is 3-8MB; capped at 1600px / jpeg 0.82 it's typically a few hundred KB */
+function resizeImageFile(file, maxDim) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => resolve(blob || file), "image/jpeg", 0.82);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.src = url;
+  });
+}
+
+/* ---- photo picker + gallery/viewer — one hidden <input> shared by every
+   "Photos" button, plus a full-screen modal for browsing/adding/deleting ---- */
+let pendingPhotoPick = null; // { kind, id, onDone }
+function triggerPhotoPick(kind, id, onDone) {
+  pendingPhotoPick = { kind, id, onDone };
+  const input = $("#photoFile");
+  if (input) { input.value = ""; input.click(); }
+}
+function showFullPhoto(url, onDelete) {
+  const div = document.createElement("div");
+  div.className = "photo-viewer";
+  div.style.zIndex = "4100";
+  div.innerHTML = `<div class="photo-viewer-inner">
+      <img src="${url}" />
+      <div class="photo-viewer-bar">
+        <button class="btn btn-sm btn-danger" data-a="del">Delete photo</button>
+        <button class="btn btn-sm btn-ghost" data-a="close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(div);
+  div.addEventListener("click", (e) => { if (e.target === div) div.remove(); });
+  div.querySelector('[data-a="close"]').onclick = () => div.remove();
+  div.querySelector('[data-a="del"]').onclick = () => { div.remove(); onDelete(); };
+}
+function openPhotoModal(kind, id, title) {
+  const div = document.createElement("div");
+  div.className = "photo-viewer";
+  div.innerHTML = `<div class="photo-viewer-inner">
+      <div class="photo-viewer-head">
+        <b>${esc(title)} — photos</b>
+        <button class="btn btn-sm btn-ghost" data-a="close">Close</button>
+      </div>
+      <div class="photo-grid" id="pmGrid"><div class="hint">Loading…</div></div>
+    </div>`;
+  document.body.appendChild(div);
+  let urls = [];
+  const revokeAll = () => { urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; };
+  const close = () => { revokeAll(); div.remove(); };
+  div.addEventListener("click", (e) => { if (e.target === div) close(); });
+  div.querySelector('[data-a="close"]').onclick = close;
+  const refresh = () => {
+    getPhotos(kind, id).then((photos) => {
+      revokeAll();
+      const grid = div.querySelector("#pmGrid");
+      if (!grid) return;
+      urls = photos.map((p) => URL.createObjectURL(p.blob));
+      grid.innerHTML =
+        photos.map((p, i) => `<div class="photo-thumb" data-pid="${p.id}"><img src="${urls[i]}" /></div>`).join("") +
+        `<button type="button" class="photo-add" data-add="1">+</button>`;
+      grid.querySelectorAll("[data-pid]").forEach((node) => {
+        node.onclick = () => {
+          const i = photos.findIndex((x) => x.id === node.dataset.pid);
+          if (i < 0) return;
+          showFullPhoto(urls[i], () => {
+            if (!confirm("Delete this photo?")) return;
+            deletePhoto(photos[i].id).then(refresh);
+          });
+        };
+      });
+      const add = grid.querySelector("[data-add]");
+      if (add) add.onclick = () => triggerPhotoPick(kind, id, refresh);
+    });
+  };
+  refresh();
 }
 
 /* a tile layer that reads/writes the cache above — falls back to a plain
@@ -5790,10 +5973,11 @@ function signPopup(sign, marker) {
     <textarea data-f="note" placeholder="note${
       sign.type === "camera" ? " — what's showing up, last card pull…" : ""
     }">${esc(sign.note || "")}</textarea>
-    <div style="display:flex;gap:6px;margin-top:4px">
+    <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-sm" data-a="save">Save</button>
       <button class="btn btn-sm btn-ghost" data-a="copy">Copy coords</button>
       <button class="btn btn-sm btn-ghost" data-a="move">Move</button>
+      <button class="btn btn-sm btn-ghost" data-a="photos">Photos</button>
       <button class="btn btn-sm btn-danger" data-a="del">Delete</button>
     </div>`;
   div.querySelector('[data-a="save"]').onclick = () => {
@@ -5810,12 +5994,14 @@ function signPopup(sign, marker) {
     map.closePopup();
     beginMovePin("sign", sign.id);
   };
+  div.querySelector('[data-a="photos"]').onclick = () => openPhotoModal("sign", sign.id, signDef(sign.type).label);
   div.querySelector('[data-a="del"]').onclick = () => {
     state.signs = state.signs.filter((s) => s.id !== sign.id);
     saveState();
     renderSignMarkers();
     renderSignsPanel();
     map.closePopup();
+    deletePhotosFor("sign", sign.id);
   };
   L.popup({ minWidth: 220 }).setLatLng([sign.lat, sign.lng]).setContent(div).openOn(map);
 }
@@ -5828,6 +6014,7 @@ function deleteStand(id) {
   renderStandMarkers();
   renderStands();
   clearScent();
+  deletePhotosFor("stand", id);
 }
 
 /* --------------------------------------------------------------- render -- */
@@ -6991,6 +7178,7 @@ function renderStands(focusEditor) {
            <button class="btn btn-sm" id="btnEditStand">Edit ${esc(sel.name)}</button>
            <button class="btn btn-sm btn-ghost" id="btnStandMap">Show on map</button>
            <button class="btn btn-sm btn-ghost" id="btnMoveStand">Move</button>
+           <button class="btn btn-sm btn-ghost" id="btnStandPhotos">Photos</button>
            <button class="btn btn-sm ${navingThis ? "" : "btn-ghost"}" id="btnGoTo">${navingThis ? "Stop navigating" : "Go to"}</button>
          </div>`
       : "";
@@ -7014,6 +7202,8 @@ function renderStands(focusEditor) {
     };
   const mv = $("#btnMoveStand");
   if (mv) mv.onclick = () => beginMovePin("stand", sel.id);
+  const ph = $("#btnStandPhotos");
+  if (ph) ph.onclick = () => openPhotoModal("stand", sel.id, sel.name);
   const gt = $("#btnGoTo");
   if (gt)
     gt.onclick = () => {
@@ -7650,6 +7840,18 @@ function init() {
   $("#importFile").onchange = (e) => {
     if (e.target.files[0]) importData(e.target.files[0]);
     e.target.value = "";
+  };
+  $("#photoFile").onchange = (e) => {
+    const files = Array.from(e.target.files || []);
+    const target = pendingPhotoPick;
+    pendingPhotoPick = null;
+    e.target.value = "";
+    if (!files.length || !target) return;
+    toast(files.length > 1 ? `Saving ${files.length} photos…` : "Saving photo…");
+    Promise.all(files.map((f) => resizeImageFile(f, 1600).then((blob) => addPhoto(target.kind, target.id, blob)))).then(() => {
+      toast("Saved");
+      if (target.onDone) target.onDone();
+    });
   };
 
   fetchWeather(false);
