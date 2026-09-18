@@ -1315,10 +1315,11 @@ ol.steps li span { color: var(--text-dim); }
     </div>
     <div class="panel-body" id="panelBody"><!-- rendered by app.js --></div>
     <footer class="panel-foot">
+      <button id="btnShare" class="btn btn-ghost">AirDrop</button>
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Trail show/hide</span>
+      <span class="build-tag">AirDrop sync</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -7474,6 +7475,28 @@ function exportData() {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
+async function shareData() {
+  const filename = `deer-planner-${todayISO()}.json`;
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  // AirDrop only shows up via the OS share sheet — Web Share API is the one
+  // way a web page can open it (no browser lets a page target AirDrop directly).
+  const file = new File([blob], filename, { type: "application/json" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: "Deer Planner data" });
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") return; // user backed out of the share sheet
+    }
+  }
+  // desktop / unsupported browser — just download like Export
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast("AirDrop isn't available in this browser — file downloaded instead");
+}
 function importData(file) {
   const fr = new FileReader();
   fr.onload = () => {
@@ -7547,6 +7570,7 @@ function init() {
   $(".panel-head").appendChild(hideBtn);
 
   $("#btnExport").onclick = exportData;
+  $("#btnShare").onclick = shareData;
   $("#btnImport").onclick = () => $("#importFile").click();
   $("#importFile").onchange = (e) => {
     if (e.target.files[0]) importData(e.target.files[0]);
