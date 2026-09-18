@@ -1320,7 +1320,7 @@ ol.steps li span { color: var(--text-dim); }
       <button id="btnExport" class="btn btn-ghost">Export</button>
       <button id="btnImport" class="btn btn-ghost">Import</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden />
-      <span class="build-tag">Trail map btn</span>
+      <span class="build-tag">Trail labels off</span>
     </footer>
   </aside>
   <div id="map"></div>
@@ -5140,7 +5140,8 @@ function addShapeToMap(shape) {
       ? L.polygon(shape.latlngs, style)
       : L.polyline(shape.latlngs, style);
   layer._dp_id = shape.id;
-  if (shape.label) layer.bindTooltip(esc(shape.label), { permanent: true, direction: "center", className: "shape-label" });
+  // trail labels stay off the map to keep it clean — tap the line to see its name and delete it
+  if (shape.label && shape.kind !== "trail") layer.bindTooltip(esc(shape.label), { permanent: true, direction: "center", className: "shape-label" });
   layer.on("click", (ev) => {
     L.DomEvent.stop(ev);
     shapePopup(shape, layer, ev.latlng);
